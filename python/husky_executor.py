@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import sys
 import threading
 import time
@@ -41,7 +42,10 @@ class HuskyExecutor(mesos.interface.Executor):
             update.data = "run"
             driver.sendStatusUpdate(update)
 
-            print "Test"
+            cmd = "LD_LIBRARY_PATH=/data/opt/lib:/data/opt/brew/lib " + task.data
+            print cmd
+            os.system(cmd)
+
             update = mesos_pb2.TaskStatus()
             update.task_id.value = task.task_id.value
             update.state = mesos_pb2.TASK_FINISHED

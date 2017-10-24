@@ -18,9 +18,16 @@ import os
 import sys
 import time
 
-import mesos.interface
-from mesos.interface import mesos_pb2
-import mesos.native
+try:
+    import mesos.interface
+    from mesos.interface import mesos_pb2
+    import mesos.native
+except ImportError as e:
+    print(e)
+    sys.exit(1)
+
+PYTHON_EXECUTABLE = sys.executable
+CURRENT_PATH = os.getcwd()
 
 
 class HuskyScheduler(mesos.interface.Scheduler):
@@ -33,30 +40,53 @@ class HuskyScheduler(mesos.interface.Scheduler):
     def registered(self, driver, frameworkId, masterInfo):
         print "Registered with framework ID %s" % frameworkId.value
 
+    def makeTaskPrototype(self, offer, name):
+        task = mesos_pb2.TaskInfo()
+        task.task_id.value = str(name)
+        task.slave_id.value = offer.slave_id.value
+        task.name = "start worker task %s" % name
+
+        cpus = task.resources.add()
+        cpus.name = "cpus"
+        cpus.type = mesos_pb2.Value.SCALAR
+        cpus.scalar.value = 1
+
+        mem = task.resources.add()
+        mem.name = "mem"
+        mem.type = mesos_pb2.Value.SCALAR
+        mem.scalar.value = 32
+
+        task.executor.MergeFrom(self.executor)
+
+        return task
+
     def resourceOffers(self, driver, offers):
         for offer in offers:
+            if self.done:
+                print "Shutting down: declining offer on [%s]" % offer.hostname
+                driver.declineOffer(offer.id)
+                continue
+
             tasks = []
+
             if not self.done:
-                for i in xrange(2):
-                    task = mesos_pb2.TaskInfo()
-                    task.task_id.value = str(i)
-                    task.slave_id.value = offer.slave_id.value
-                    task.name = "test task %d" % i
+                master_task = self.makeTaskPrototype(offer, "Master")
+                master_task.data = "./Master --conf config.ini"
+                self.taskData[master_task.task_id.value] = (offer.slave_id, master_task.executor.executor_id)
 
-                    cpus = task.resources.add()
-                    cpus.name = "cpus"
-                    cpus.type = mesos_pb2.Value.SCALAR
-                    cpus.scalar.value = 1
+                worker_task = self.makeTaskPrototype(offer, "Worker")
+                worker_task.data = "./PI --conf config.ini"
+                self.taskData[worker_task.task_id.value] = (offer.slave_id, worker_task.executor.executor_id)
 
-                    task.executor.MergeFrom(self.executor)
-                    tasks.append(task)
-                    self.taskData[task.task_id.value] = (offer.slave_id, task.executor.executor_id)
+                tasks += [master_task, worker_task]
                 self.done = True
-            operation = mesos_pb2.Offer.Operation()
-            operation.type = mesos_pb2.Offer.Operation.LAUNCH
-            operation.launch.task_infos.extend(tasks)
 
-            driver.acceptOffers([offer.id], [operation])
+            if tasks:
+                print "Accepting offer on [%s]" % offer.hostname
+                driver.launchTasks(offer.id, tasks)
+            else:
+                print "Declining offer on [%s]" % offer.hostname
+                driver.declineOffer(offer.id)
 
     def statusUpdate(self, driver, update):
         print "task %s is in state %s" % (update.task_id.value, mesos_pb2.TaskState.Name(update.state))
@@ -90,14 +120,18 @@ if __name__ == "__main__":
         print "Usage: %s master" % sys.argv[0]
         sys.exit(1)
 
+    uris = [os.path.join(CURRENT_PATH, "husky", uri) for uri in ["Master", "PI", "config.ini"]]
+    uris.append(os.path.join(CURRENT_PATH, "husky_executor.py"))
+
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "husky-executor"
     executor.name = "Husky Executor (Python)"
-    executor.command.value = "/data/opt/brew/bin/python husky_executor.py"
-    uri = executor.command.uris.add()
-    uri.value = os.path.join(os.getcwd(), "husky_executor.py")
-    print uri.value
-    uri.extract = False
+    executor.command.value = "%s husky_executor.py" % PYTHON_EXECUTABLE
+
+    for uri in uris:
+        uri_proto = executor.command.uris.add()
+        uri_proto.value = uri
+        uri_proto.extract = False
 
     framework = mesos_pb2.FrameworkInfo()
     framework.user = "" # Have Mesos fill in the current user.
