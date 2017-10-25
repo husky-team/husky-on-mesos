@@ -34,8 +34,11 @@ class HuskyScheduler(mesos.interface.Scheduler):
     def __init__(self, executor):
         self.executor = executor
         self.done = False
-        self.taskData = {}
+        self.taskData = dict()
         self.messagesReceived = 0
+
+        self.hostnames = set()
+        self.workerCount = 1
 
     def registered(self, driver, frameworkId, masterInfo):
         print "Registered with framework ID %s" % frameworkId.value
@@ -62,20 +65,21 @@ class HuskyScheduler(mesos.interface.Scheduler):
 
     def resourceOffers(self, driver, offers):
         for offer in offers:
-            if self.done:
-                print "Shutting down: declining offer on [%s]" % offer.hostname
-                driver.declineOffer(offer.id)
-                continue
+            self.hostnames.add(offer.hostname)
 
+        print self.hostnames
+
+        for offer in offers:
             tasks = []
 
             if not self.done:
+                hostname = offer.hostname.encode('utf-8')
                 master_task = self.makeTaskPrototype(offer, "Master")
-                master_task.data = "./Master --conf config.ini"
+                master_task.data = "./Master --master_host=%s --master_port=14517 --comm_port=14818 --worker.info %s:4 --log_dir=. --serve=0 --hdfs_namenode=%s --hdfs_namenode_port=9000" % (hostname, hostname, hostname)
                 self.taskData[master_task.task_id.value] = (offer.slave_id, master_task.executor.executor_id)
 
                 worker_task = self.makeTaskPrototype(offer, "Worker")
-                worker_task.data = "./PI --conf config.ini"
+                worker_task.data = "./PI --master_host=%s --master_port=14517 --comm_port=14818 --worker.info %s:4 --log_dir=." % (hostname, hostname)
                 self.taskData[worker_task.task_id.value] = (offer.slave_id, worker_task.executor.executor_id)
 
                 tasks += [master_task, worker_task]
@@ -84,9 +88,6 @@ class HuskyScheduler(mesos.interface.Scheduler):
             if tasks:
                 print "Accepting offer on [%s]" % offer.hostname
                 driver.launchTasks(offer.id, tasks)
-            else:
-                print "Declining offer on [%s]" % offer.hostname
-                driver.declineOffer(offer.id)
 
     def statusUpdate(self, driver, update):
         print "task %s is in state %s" % (update.task_id.value, mesos_pb2.TaskState.Name(update.state))
@@ -120,7 +121,7 @@ if __name__ == "__main__":
         print "Usage: %s master" % sys.argv[0]
         sys.exit(1)
 
-    uris = [os.path.join(CURRENT_PATH, "husky", uri) for uri in ["Master", "PI", "config.ini"]]
+    uris = [os.path.join(CURRENT_PATH, "husky", uri) for uri in ["Master", "PI"]]
     uris.append(os.path.join(CURRENT_PATH, "husky_executor.py"))
 
     executor = mesos_pb2.ExecutorInfo()

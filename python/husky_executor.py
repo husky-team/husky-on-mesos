@@ -19,9 +19,13 @@ import sys
 import threading
 import time
 
-import mesos.interface
-from mesos.interface import mesos_pb2
-import mesos.native
+try:
+    import mesos.interface
+    from mesos.interface import mesos_pb2
+    import mesos.native
+except ImportError as e:
+    print(e)
+    sys.exit(1)
 
 class HuskyExecutor(mesos.interface.Executor):
     def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
@@ -44,7 +48,7 @@ class HuskyExecutor(mesos.interface.Executor):
 
             cmd = "LD_LIBRARY_PATH=/data/opt/lib:/data/opt/brew/lib " + task.data
             print cmd
-            os.system(cmd)
+            print os.system(cmd)
 
             update = mesos_pb2.TaskStatus()
             update.task_id.value = task.task_id.value
