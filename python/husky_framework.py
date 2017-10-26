@@ -27,21 +27,27 @@ except ImportError as e:
     sys.exit(1)
 
 PYTHON_EXECUTABLE = sys.executable
-CURRENT_PATH = os.getcwd()
 
+MASTER_PORT = 14517
+COMM_PORT = 14818
+
+HDFS_NAMENODE = ('master', '9000')
 
 class HuskyScheduler(mesos.interface.Scheduler):
-    def __init__(self, executor):
+    def __init__(self, executor, cpus=1, mems=32):
         self.executor = executor
-        self.done = False
-        self.taskData = dict()
-        self.messagesReceived = 0
+        self.cpus = cpus
+        self.mems = mems
 
-        self.hostnames = set()
-        self.workerCount = 1
+        self.finished = False
+        self.task_data = dict()
+        self.messages_received = 0
 
-    def registered(self, driver, frameworkId, masterInfo):
-        print "Registered with framework ID %s" % frameworkId.value
+        self.master_host = None
+        self.workers = set()
+
+    def registered(self, driver, framework_id, master_info):
+        print "Registered with framework ID %s" % framework_id.value
 
     def makeTaskPrototype(self, offer, name):
         task = mesos_pb2.TaskInfo()
@@ -52,42 +58,50 @@ class HuskyScheduler(mesos.interface.Scheduler):
         cpus = task.resources.add()
         cpus.name = "cpus"
         cpus.type = mesos_pb2.Value.SCALAR
-        cpus.scalar.value = 1
+        cpus.scalar.value = self.cpus
 
         mem = task.resources.add()
         mem.name = "mem"
         mem.type = mesos_pb2.Value.SCALAR
-        mem.scalar.value = 32
+        mem.scalar.value = self.mems
 
         task.executor.MergeFrom(self.executor)
 
         return task
 
     def resourceOffers(self, driver, offers):
-        for offer in offers:
-            self.hostnames.add(offer.hostname)
+        if len(self.workers) == 0:
+            for offer in offers:
+                self.workers.add(offer.hostname.encode('utf-8'))
+        worker_info = ['%s:%s' % (worker, self.cpus) for worker in sorted(self.workers)]
 
-        print self.hostnames
-
+        worker_count = 0
         for offer in offers:
+            if self.finished:
+                continue
+
             tasks = []
+            hostname = offer.hostname.encode('utf-8')
+            if self.master_host is None:
+                master_task = self.makeTaskPrototype(offer, "Master-%s" % hostname)
+                master_task.data = "./Master --master_host={0} --master_port={1} --comm_port={2} --worker.info {3} --log_dir=. --serve=0 --hdfs_namenode={4} --hdfs_namenode_port={5}".format(hostname, MASTER_PORT, COMM_PORT, ' '.join(worker_info), HDFS_NAMENODE[0], HDFS_NAMENODE[1])
+                self.master_host = hostname
+                self.task_data[master_task.task_id.value] = (offer.slave_id, master_task.executor.executor_id)
+                tasks.append(master_task)
 
-            if not self.done:
-                hostname = offer.hostname.encode('utf-8')
-                master_task = self.makeTaskPrototype(offer, "Master")
-                master_task.data = "./Master --master_host=%s --master_port=14517 --comm_port=14818 --worker.info %s:4 --log_dir=. --serve=0 --hdfs_namenode=%s --hdfs_namenode_port=9000" % (hostname, hostname, hostname)
-                self.taskData[master_task.task_id.value] = (offer.slave_id, master_task.executor.executor_id)
+            worker_task = self.makeTaskPrototype(offer, "Worker-%s" % hostname)
+            worker_task.data = "./PI --master_host={0} --master_port={1} --comm_port={2} --worker.info {3} --log_dir=.".format(self.master_host, MASTER_PORT, COMM_PORT, ' '.join(worker_info))
+            self.task_data[worker_task.task_id.value] = (offer.slave_id, worker_task.executor.executor_id)
 
-                worker_task = self.makeTaskPrototype(offer, "Worker")
-                worker_task.data = "./PI --master_host=%s --master_port=14517 --comm_port=14818 --worker.info %s:4 --log_dir=." % (hostname, hostname)
-                self.taskData[worker_task.task_id.value] = (offer.slave_id, worker_task.executor.executor_id)
-
-                tasks += [master_task, worker_task]
-                self.done = True
+            tasks.append(worker_task)
 
             if tasks:
                 print "Accepting offer on [%s]" % offer.hostname
                 driver.launchTasks(offer.id, tasks)
+                worker_count += 1
+
+            if worker_count == len(self.workers):
+                self.finished = True
 
     def statusUpdate(self, driver, update):
         print "task %s is in state %s" % (update.task_id.value, mesos_pb2.TaskState.Name(update.state))
@@ -97,7 +111,7 @@ class HuskyScheduler(mesos.interface.Scheduler):
             sys.exit(1)
 
         if update.state == mesos_pb2.TASK_FINISHED:
-            slave_id, executor_id = self.taskData[update.task_id.value]
+            slave_id, executor_id = self.task_data[update.task_id.value]
             driver.sendFrameworkMessage(executor_id, slave_id, "Finished")
 
         if update.state == mesos_pb2.TASK_LOST or \
@@ -105,24 +119,30 @@ class HuskyScheduler(mesos.interface.Scheduler):
            update.state == mesos_pb2.TASK_FAILED:
             driver.abort()
 
-    def frameworkMessage(self, driver, executorId, slaveId, message):
-        self.messagesReceived += 1
+    def frameworkMessage(self, driver, executor_id, slave_id, message):
+        self.messages_received += 1
         if message != "Finished":
             print "Wrong message: %s" % str(message)
             sys.exit(1)
 
         print "received msg:", repr(str(message))
 
-        if self.messagesReceived == 2:
+        if self.messages_received == len(self.workers) + 1:
             driver.stop()
 
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print "Usage: %s master" % sys.argv[0]
+    if len(sys.argv) != 5:
+        print "Usage: %s mesos-master cpus(Integer) mems(Integer-MB) path-to-resources" % sys.argv[0]
         sys.exit(1)
 
-    uris = [os.path.join(CURRENT_PATH, "husky", uri) for uri in ["Master", "PI"]]
-    uris.append(os.path.join(CURRENT_PATH, "husky_executor.py"))
+    cpus, mems = int(sys.argv[2]), int(sys.argv[3])
+    path_to_resources = sys.argv[4]
+
+    cp_cmd = 'cp %s/husky_executor.py %s' % (os.getcwd(), path_to_resources)
+    print cp_cmd
+    os.system(cp_cmd)
+    uris = [os.path.join(path_to_resources, uri) for uri in ["husky_executor.py", "Master", "PI"]]
 
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "husky-executor"
@@ -140,7 +160,7 @@ if __name__ == "__main__":
     framework.checkpoint = True
 
     driver = mesos.native.MesosSchedulerDriver(
-        HuskyScheduler(executor),
+        HuskyScheduler(executor, cpus, mems),
         framework,
         sys.argv[1])
 

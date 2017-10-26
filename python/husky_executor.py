@@ -28,10 +28,10 @@ except ImportError as e:
     sys.exit(1)
 
 class HuskyExecutor(mesos.interface.Executor):
-    def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
+    def registered(self, driver, executor_info, framework_info, slave_info):
         print "HuskyExecutor registered"
 
-    def reregistered(self, driver, slaveInfo):
+    def reregistered(self, driver, slave_info):
         print "HuskyExecutor reregistered"
 
     def disconnected(self, driver):
@@ -62,11 +62,9 @@ class HuskyExecutor(mesos.interface.Executor):
     def frameworkMessage(self, driver, message):
         driver.sendFrameworkMessage(message)
 
-    def killTask(self, driver, taskId):
-        print "Shutdown task %s" % taskId
+    def killTask(self, driver, task_id):
+        print "Shutdown task %s" % task_id
 
-    def error(self, error, message):
-        pass
 
 if __name__ == "__main__":
     print "Starting HuskyExecutor"
